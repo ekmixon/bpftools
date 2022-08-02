@@ -13,8 +13,19 @@ class TestP0f(unittest.TestCase):
         wrpcap("/tmp/p0f.pcap", packet)
         p0f_bpf = bpftools.gen_p0f.p0f.P0fBPF(p0f)
 
-        proc = subprocess.Popen(['/usr/sbin/tcpdump','-r', '/tmp/p0f.pcap', '-n', "%s" % p0f_bpf.bpf_str],stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        match = True if proc.stdout.readline() != '' else False
+        proc = subprocess.Popen(
+            [
+                '/usr/sbin/tcpdump',
+                '-r',
+                '/tmp/p0f.pcap',
+                '-n',
+                f"{p0f_bpf.bpf_str}",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        match = proc.stdout.readline() != ''
 
         self.assertEqual(match, should_match)
 

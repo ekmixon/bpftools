@@ -105,11 +105,11 @@ def unpack_domain(data, off):
         if c == 0x00:
             off += 1
             break
-        elif (c & 0xC0):
+        elif c & 0xC0:
             c, = struct.unpack_from('!H', data, off)
             ptr = c ^ 0xc000
             off += 2
-            if off1 == None:
+            if off1 is None:
                 off1 = off
             off = ptr
         else:

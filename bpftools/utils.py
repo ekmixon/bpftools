@@ -63,24 +63,21 @@ def find_ip_offset(l2, max_off=40):
         if l2[off-2:off] == '\x86\xdd' and _looks_like_ip(l2, off) == 6:
             return off
 
-    # okay, just look for ip header
-    for off in xrange(0, max_off, 2):
-        if _looks_like_ip(l2, off):
-            return off
-
-    return None
+    return next(
+        (off for off in xrange(0, max_off, 2) if _looks_like_ip(l2, off)), None
+    )
 
 def scrub_byte(data, minval, maxval, ip_constant):
-    if not (ord(data) >= minval and ord(data) < maxval):
+    if ord(data) < minval or ord(data) >= maxval:
         return data
     ip_byte_str = hexlify(data)
     ip_byte_int = int(ip_byte_str, 16)
-    ip_byte_int = ip_byte_int - minval
+    ip_byte_int -= minval
     obfuscated_byte = (ip_byte_int + ip_constant) % (maxval-minval)
     obfuscated_byte = obfuscated_byte + minval
     obfuscated_str = format(obfuscated_byte,'x')
     if len(obfuscated_str) == 1:
-        obfuscated_str = "0" + obfuscated_str
+        obfuscated_str = f"0{obfuscated_str}"
     obfuscated_str = unhexlify(obfuscated_str.rstrip(b"\n"))
     return obfuscated_str
 
@@ -108,7 +105,7 @@ def scrub_dns_name(data, ip_ihl, ip_hdr_off, entropy):
             rtr = scrub_byte(rtr, ord('A'), ord('Z') + 1, entropy[name_offset % len(entropy)])
             rtr = scrub_byte(rtr, ord('0'), ord('9') + 1, entropy[name_offset % len(entropy)])
             data[dns_hdr_off + 12 + name_offset + idx + 1] = rtr
-            idx = idx + 1
+            idx += 1
         name_offset = name_offset + str_len_off + 1
 
 
@@ -130,12 +127,12 @@ def do_scrub(l2, ip_hdr_off):
 
     ipver = ord(data[ip_hdr_off])
     if ipver & 0xF0 == 0x40: 
-        # IPV4
-        # Scrubbing IPs
-        ip_ihl = (ipver & 0x0F)*4
         for i in xrange(ip_hdr_off+12, ip_hdr_off+12+4+4, 1):
             data[i] = scrub_byte(data[i], 0, 256, entropy[i % len(entropy)])
         if ord(data[ip_hdr_off+9]) == 0x11:
+            # IPV4
+            # Scrubbing IPs
+            ip_ihl = (ipver & 0x0F)*4
             # UDP
             scrub_dns_name(data, ip_ihl, ip_hdr_off, entropy)
     elif ipver & 0xF0 == 0x60:

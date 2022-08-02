@@ -49,33 +49,25 @@ class P0fBPF:
         self.build_doc_bpf_filter()
 
     def parse_ittl(self):
-        if self.ittl.endswith("-"):
-            self.ttl_rand = True
-        else:
-            self.ttl_rand = False
+        self.ttl_rand = bool(self.ittl.endswith("-"))
 
     def parse_win_size(self):
-        m = re.match("mss\*(?P<mss>(\d+))", self.win_size)
-        if m:
+        if m := re.match("mss\*(?P<mss>(\d+))", self.win_size):
             self.win_size_type = 'mss_mult'
             self.win_size = m.groupdict()['mss']
+        elif m := re.match("mtu\*(?P<mtu>(\d+))", self.win_size):
+            self.win_size_type = 'mtu_mult'
+            self.win_size = m.groupdict()['mtu']
+        elif m := re.match("%(?P<const>(\d+))", self.win_size):
+            self.win_size_type = 'const_mult'
+            self.win_size = m.groupdict()['const']
         else:
-            m = re.match("mtu\*(?P<mtu>(\d+))", self.win_size)
-            if m:
-                self.win_size_type = 'mtu_mult'
-                self.win_size = m.groupdict()['mtu']
-            else:
-                m = re.match("%(?P<const>(\d+))", self.win_size)
-                if m:
-                    self.win_size_type = 'const_mult'
-                    self.win_size = m.groupdict()['const']
-                else:
-                    self.win_size_type = 'const'
+            self.win_size_type = 'const'
 
     def parse_sig(self):
         self.ver, self.ittl, self.olen, self.mss, self.win, self.olayout, self.quirks, self.pclass = self.p0f_str.split(':')
 
-        if self.ver != '4' and self.ver != '6':
+        if self.ver not in ['4', '6']:
             raise ValueError("IP version must be either 4 or 6")
 
         if not re.match("^(\d+)-?$", self.ittl):
@@ -98,14 +90,35 @@ class P0fBPF:
 
         self.olayout = self.olayout.split(',')
         if self.olayout == ['']: self.olayout = []
-        opts = set(self.olayout) - set(['eol', 'nop', 'mss', 'ws', 'sok', 'ts'])
+        opts = set(self.olayout) - {'eol', 'nop', 'mss', 'ws', 'sok', 'ts'}
         if len(opts) == 1 and not re.match("^eol\+(\d+)$", opts.pop()):
                 raise ValueError("Invalid option in olayout")
         elif len(opts) >= 1:
                 raise ValueError("Invalid options in olayout")
 
         self.quirks = self.quirks.split(',')
-        quirks = set(self.quirks) - set(['', 'df', 'id+', 'id-', 'ecn', '0+', 'flow', 'seq-', 'ack-', 'ack+', 'uptr+', 'urgf+', 'pushf+', 'ts1-', 'ts2+', 'opt+', 'exws', 'linux', 'bad'])
+        quirks = set(self.quirks) - {
+            '',
+            'df',
+            'id+',
+            'id-',
+            'ecn',
+            '0+',
+            'flow',
+            'seq-',
+            'ack-',
+            'ack+',
+            'uptr+',
+            'urgf+',
+            'pushf+',
+            'ts1-',
+            'ts2+',
+            'opt+',
+            'exws',
+            'linux',
+            'bad',
+        }
+
         if len(quirks) > 0:
             raise ValueError("Invalid quirks")
 
@@ -135,21 +148,19 @@ class P0fBPF:
         cur_tcp_opt_off = 20
 
         for opt in self.olayout:
-            if   opt == 'eol': code, inc = 0, 1
+            if opt == 'eol': code, inc = 0, 1
             elif opt == 'nop': code, inc = 1, 1
             elif opt == 'mss': code, inc = 2, 4
             elif opt == 'ws':  code, inc = 3, 3
             elif opt == 'sok': code, inc = 4, 2
             elif opt == 'ts':  code, inc = 8, 10
+            elif m := re.match("eol\+(?P<eol_pad>(\d+))", opt):
+                self.eol_pad = int(m.groupdict()['eol_pad'])
+                opt = 'eol'
+                code = 0
+                inc = 1
             else:
-                m = re.match("eol\+(?P<eol_pad>(\d+))", opt)
-                if m:
-                    self.eol_pad = int(m.groupdict()['eol_pad'])
-                    opt = 'eol'
-                    code = 0
-                    inc = 1
-                else:
-                    raise ValueError("Invalid TCP option in olayout field")
+                raise ValueError("Invalid TCP option in olayout field")
 
             self.tcp_opt_offsets.append([opt, code, cur_tcp_opt_off])
             cur_tcp_opt_off += inc
@@ -173,34 +184,44 @@ class P0fBPF:
     def build_olen(self):
         if self.ver == '4' and self.olen != '*':
             hl = self.ip_field('hl')
-            self.steps.append([hl, '==', 5 + int(self.olen), 'IP options len == %s' % self.olen])
+            self.steps.append(
+                [hl, '==', 5 + int(self.olen), f'IP options len == {self.olen}']
+            )
 
     def build_mss(self):
-        if self.mss != '*' and self.mss != '0':
+        if self.mss not in ['*', '0']:
             mss_off = self.get_tcp_opt_offset(self.tcp_opt_offsets, 'mss', 2, 2)
-            self.steps.append([mss_off, '==', self.mss, 'mss == %s' % self.mss])
+            self.steps.append([mss_off, '==', self.mss, f'mss == {self.mss}'])
 
     def build_win_size(self):
-        if self.win_size != '*':
-            win_size = self.tcp_field('win_size')
+        if self.win_size == '*':
+            return
+        win_size = self.tcp_field('win_size')
 
-            if self.win_size_type == 'mss_mult':
-                mss_off = self.get_tcp_opt_offset(self.tcp_opt_offsets, 'mss', 2, 2)
-                mss_mult = [mss_off, '*', self.win_size]
-                self.steps.append([win_size, '==', mss_mult, 'win size == mss * %s' % self.win_size])
-            elif self.win_size_type == 'mtu_mult':
-                mtu_mult = ['1500', '*', self.win_size] # assume mtu=1500
-                self.steps.append([win_size, '==', mtu_mult, 'win size == mtu'])
-            elif self.win_size_type == 'const_mult':
-                const_mul = [win_size, '%', self.win_size]
-                self.steps.append([const_mul, '==', 0, 'win size == x * %s' % self.win_size])
-            else:
-                self.steps.append([win_size, '==', self.win_size, 'win size == %s' % self.win_size])
+        if self.win_size_type == 'mss_mult':
+            mss_off = self.get_tcp_opt_offset(self.tcp_opt_offsets, 'mss', 2, 2)
+            mss_mult = [mss_off, '*', self.win_size]
+            self.steps.append(
+                [win_size, '==', mss_mult, f'win size == mss * {self.win_size}']
+            )
+
+        elif self.win_size_type == 'mtu_mult':
+            mtu_mult = ['1500', '*', self.win_size] # assume mtu=1500
+            self.steps.append([win_size, '==', mtu_mult, 'win size == mtu'])
+        elif self.win_size_type == 'const_mult':
+            const_mul = [win_size, '%', self.win_size]
+            self.steps.append([const_mul, '==', 0, f'win size == x * {self.win_size}'])
+        else:
+            self.steps.append(
+                [win_size, '==', self.win_size, f'win size == {self.win_size}']
+            )
 
     def build_win_scale(self):
-        if self.win_scale != '*' and self.win_scale != '0':
+        if self.win_scale not in ['*', '0']:
             ws_off = self.get_tcp_opt_offset(self.tcp_opt_offsets, 'ws', 2, 1)
-            self.steps.append([ws_off, '==', self.win_scale, 'win scale == %s' % self.win_scale])
+            self.steps.append(
+                [ws_off, '==', self.win_scale, f'win scale == {self.win_scale}']
+            )
 
     def build_eol_pad(self):
         pad_pos = self.eol_start
@@ -217,25 +238,33 @@ class P0fBPF:
             op = '!=' if 'opt+' in self.quirks else '=='
 
             if self.ver == '4':
-                self.steps.append(["tcp[%s:%s]" % (pad_pos, cur_chunk_len), op, 0, 'eol pad %s 0' % op])
+                self.steps.append(
+                    [f"tcp[{pad_pos}:{cur_chunk_len}]", op, 0, f'eol pad {op} 0']
+                )
+
             else:
-                self.steps.append(["ip6[(40 + %s):%s]" % (pad_pos, cur_chunk_len), op, 0, 'eol pad %s 0' % op])
+                self.steps.append(
+                    [
+                        f"ip6[(40 + {pad_pos}):{cur_chunk_len}]",
+                        op,
+                        0,
+                        f'eol pad {op} 0',
+                    ]
+                )
+
 
             pad_pos += cur_chunk_len
             pad_left -= cur_chunk_len
 
     def build_tcp_olayout(self):
-        if not 'bad' in self.quirks:
+        if 'bad' not in self.quirks:
             data_off = self.tcp_field('data_off')
             data_off_val = 5 + int(math.ceil(self.tcp_opt_len / 4.0))
             self.steps.append([data_off, '==', data_off_val, 'TCP data offset'])
 
         for o in self.tcp_opt_offsets:
-            if self.ver == '4':
-                o_off = "tcp[%d]" % o[2]
-            else:
-                o_off = "ip6[40 + %d]" % (o[2])
-            self.steps.append([o_off, '==', o[1], "olayout " + o[0]])
+            o_off = "tcp[%d]" % o[2] if self.ver == '4' else "ip6[40 + %d]" % (o[2])
+            self.steps.append([o_off, '==', o[1], f"olayout {o[0]}"])
 
         self.build_eol_pad()
 
@@ -316,16 +345,15 @@ class P0fBPF:
             self.steps.append([ws_off, '>', 14, 'exws'])
 
     def build_linux(self):
-        if 'linux' in self.quirks:
-            if self.ver == '4':
-                seq = self.tcp_field('seq')
-                ts = self.get_tcp_opt_offset(self.tcp_opt_offsets, 'ts', 2, 4)
-                id = self.ip_field('ipid')
+        if 'linux' in self.quirks and self.ver == '4':
+            seq = self.tcp_field('seq')
+            ts = self.get_tcp_opt_offset(self.tcp_opt_offsets, 'ts', 2, 4)
+            id = self.ip_field('ipid')
 
-                seq_xor_ts = [seq, '^', ts]
-                seq_xor_ts = [seq_xor_ts, '&', '0xffff']
+            seq_xor_ts = [seq, '^', ts]
+            seq_xor_ts = [seq_xor_ts, '&', '0xffff']
 
-                self.steps.append([id, '==', seq_xor_ts, 'linux'])
+            self.steps.append([id, '==', seq_xor_ts, 'linux'])
 
     def build_quirks(self):
         self.build_df()
@@ -341,18 +369,19 @@ class P0fBPF:
         self.build_linux()
 
     def build_pclass(self):
-        if self.pclass != '*':
-            if self.ver == '4':
-                tl = self.ip_field('tl')
-                hl = self.ip_field('hl')
-                data_off = self.tcp_field('data_off')
-                payload_len = "(%s - (%s * 4) - (%s * 4))" % (tl, hl, data_off)
-            else:
-                pl = self.ip_field('pl')
-                data_off = self.tcp_field('data_off')
-                payload_len = "(%s - (%s * 4))" % (pl, data_off)
-            op = '==' if self.pclass == '0' else '!='
-            self.steps.append([payload_len, op, 0, 'payload len %s 0' % op])
+        if self.pclass == '*':
+            return
+        if self.ver == '4':
+            tl = self.ip_field('tl')
+            hl = self.ip_field('hl')
+            data_off = self.tcp_field('data_off')
+            payload_len = f"({tl} - ({hl} * 4) - ({data_off} * 4))"
+        else:
+            pl = self.ip_field('pl')
+            data_off = self.tcp_field('data_off')
+            payload_len = f"({pl} - ({data_off} * 4))"
+        op = '==' if self.pclass == '0' else '!='
+        self.steps.append([payload_len, op, 0, f'payload len {op} 0'])
 
     def build_abstract_desc(self):
         self.steps = []
@@ -372,17 +401,11 @@ class P0fBPF:
         if not isinstance(s, list):
             return s
         elif len(s) == 2:
-            if doc:
-                return "%s: %s" % (s[0], s[1])
-            else:
-                return "%s" % s[0]
+            return f"{s[0]}: {s[1]}" if doc else f"{s[0]}"
         else:
             lhs = self.expand_step(s[0])
             rhs = self.expand_step(s[2])
-            if doc:
-                return "(%s %s %s): %s" % (lhs, s[1], rhs, s[3])
-            else:
-                return "(%s %s %s)" % (lhs, s[1], rhs)
+            return f"({lhs} {s[1]} {rhs}): {s[3]}" if doc else f"({lhs} {s[1]} {rhs})"
 
     def build_bpf_filter(self):
         self.bpf_str = " and ".join(self.expand_step(s) for s in self.steps)
